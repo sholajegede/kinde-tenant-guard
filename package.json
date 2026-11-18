@@ -1,0 +1,92 @@
+{
+  "name": "kinde-tenant-guard",
+  "version": "0.1.0",
+  "description": "Keep each Kinde organization's data separate. Scopes every database query to the signed-in user's active Kinde organization, with PostgreSQL row-level security as the boundary.",
+  "type": "module",
+  "license": "MIT",
+  "author": "Shola Jegede",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sholajegede/kinde-tenant-guard.git"
+  },
+  "homepage": "https://github.com/sholajegede/kinde-tenant-guard#readme",
+  "bugs": "https://github.com/sholajegede/kinde-tenant-guard/issues",
+  "keywords": [
+    "kinde",
+    "multi-tenant",
+    "tenant-isolation",
+    "row-level-security",
+    "rls",
+    "postgres",
+    "drizzle",
+    "authorization",
+    "saas",
+    "organizations"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./drizzle": {
+      "import": {
+        "types": "./dist/drizzle.d.ts",
+        "default": "./dist/drizzle.js"
+      },
+      "require": {
+        "types": "./dist/drizzle.d.cts",
+        "default": "./dist/drizzle.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "sideEffects": false,
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build"
+  },
+  "peerDependencies": {
+    "drizzle-orm": ">=0.36"
+  },
+  "peerDependenciesMeta": {
+    "drizzle-orm": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "jose": "^6.2.17"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^22.20.5",
+    "@types/pg": "^8.23.1",
+    "better-sqlite3": "^13.2.0",
+    "drizzle-orm": "^0.45.4",
+    "embedded-postgres": "17.11.0-beta.19",
+    "kinde-testkit": "^0.8.0",
+    "pg": "^8.23.1",
+    "tsup": "^8.5.1",
+    "typescript": "^5.9.3",
+    "vitest": "^5.1.1"
+  }
+}

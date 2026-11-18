@@ -1,0 +1,368 @@
+# kinde-tenant-guard
+
+Keep each Kinde organization's data separate. kinde-tenant-guard takes the active organization from a verified Kinde token and limits every database query to that organization's rows. On PostgreSQL, row-level security enforces it, so a query that forgets its filter still cannot read or change another organization's data.
+
+![How kinde-tenant-guard works: a verified Kinde token with org_code goes to Tenant Guard, which resolves the tenant and checks permissions, sets app.tenant_id for one transaction, and PostgreSQL row-level security limits every query to that tenant's rows](https://raw.githubusercontent.com/sholajegede/kinde-tenant-guard/main/docs/how-it-works.png)
+
+## Contents
+
+- [Why it exists](#why-it-exists)
+- [Install](#install)
+- [Quick start with Drizzle and PostgreSQL](#quick-start-with-drizzle-and-postgresql)
+- [What is protected](#what-is-protected)
+- [Permissions](#permissions)
+- [Background jobs](#background-jobs)
+- [SQLite, MySQL and databases without row-level security](#sqlite-mysql-and-databases-without-row-level-security)
+- [Check the database at startup](#check-the-database-at-startup)
+- [Audit events and errors](#audit-events-and-errors)
+- [Testing with kinde-testkit](#testing-with-kinde-testkit)
+- [API](#api)
+- [What this release covers](#what-this-release-covers)
+
+## Why it exists
+
+In a B2B app, many organizations share one database. Kinde tells your app which organization a user is working in: the `org_code` claim in their access token. Everything after that is your code's job. Every query has to filter by that organization, and every insert has to record it:
+
+```ts
+const { orgCode } = await getOrganization();
+const rows = await db.select().from(invoices); // forgot .where(eq(invoices.tenantId, ...))
+```
+
+Kinde's SDKs did their part correctly, and the bug is in the one line they cannot see. Every route, job and script has to remember the filter, and a single miss shows one customer another customer's invoices.
+
+kinde-tenant-guard moves the filter out of your route code:
+
+- It reads the active organization from the verified token, never from the request, and maps it to your own tenant ID.
+- It refuses to run tenant queries when there is no organization, or when the organization is not one of your tenants.
+- On PostgreSQL, it sets the tenant for one transaction, and row-level security policies filter every query on the tenant's tables: selects, joins, relational queries, counts and raw SQL. It also stamps inserts and rejects writes that name another tenant.
+- It checks the Kinde permissions your policies require for each action.
+- It gives background jobs an explicit, audited system context instead of an unscoped database client.
+
+## Install
+
+```bash
+npm install kinde-tenant-guard
+```
+
+Node 20 or later. The Drizzle adapter needs `drizzle-orm` 0.36 or later, which your app already has.
+
+## Quick start with Drizzle and PostgreSQL
+
+### 1. Add a tenant column to each tenant table
+
+`tenantIdColumn()` is a text column whose default is the tenant of the current transaction, so the database stamps new rows itself:
+
+```ts
+// db/schema.ts
+import { pgTable, serial, text, integer } from "drizzle-orm/pg-core";
+import { tenantIdColumn } from "kinde-tenant-guard/drizzle";
+
+// Maps each Kinde organization to your own tenant. Shared by all tenants.
+export const tenants = pgTable("tenants", {
+  id: text("id").primaryKey(),
+  kindeOrgCode: text("kinde_org_code").notNull().unique(),
+});
+
+export const projects = pgTable("projects", {
+  id: serial("id").primaryKey(),
+  tenantId: tenantIdColumn(),
+  name: text("name").notNull(),
+});
+
+export const invoices = pgTable("invoices", {
+  id: serial("id").primaryKey(),
+  tenantId: tenantIdColumn(),
+  projectId: integer("project_id").notNull().references(() => projects.id),
+  amount: integer("amount").notNull(),
+});
+```
+
+Keep your own tenant IDs. The Kinde organization code is an external identifier, and the `tenants` table maps one to the other.
+
+### 2. Create the guard
+
+```ts
+// db/tenant-guard.ts
+import { eq } from "drizzle-orm";
+import { createTenantGuard, definePolicies } from "kinde-tenant-guard";
+import { drizzleAdapter } from "kinde-tenant-guard/drizzle";
+import { db } from "./client";
+import { invoices, projects, tenants } from "./schema";
+
+export const tenantAdapter = drizzleAdapter(db, {
+  tables: { projects, invoices },
+  tenantColumn: "tenantId",
+});
+
+export const tenantGuard = createTenantGuard({
+  adapter: tenantAdapter,
+  resolveTenant: async (orgCode) =>
+    (await db.select({ id: tenants.id }).from(tenants).where(eq(tenants.kindeOrgCode, orgCode)))[0]?.id ?? null,
+  policies: definePolicies({
+    projects: { tenant: "required", permissions: { read: "projects:read", create: "projects:create", update: "projects:update", delete: "projects:delete" } },
+    invoices: { tenant: "required", permissions: { read: "invoices:read", create: "invoices:create" } },
+  }),
+});
+```
+
+### 3. Turn on row-level security
+
+`tenantAdapter.migrationSql()` returns the SQL for the registered tables. For each one it enables and forces row-level security, adds the tenant policy, and sets the column default. Save it as a migration, for example with `npx drizzle-kit generate --custom --name=tenant-guard`, and paste in the output of:
+
+```ts
+console.log(tenantAdapter.migrationSql());
+```
+
+```sql
+ALTER TABLE "public"."projects" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "public"."projects" FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_guard_isolation ON "public"."projects" FOR ALL
+  USING ("tenant_id" = NULLIF(current_setting('app.tenant_id', true), '')::text OR current_setting('app.tenant_guard_system', true) = 'on')
+  WITH CHECK (...the same...);
+ALTER TABLE "public"."projects" ALTER COLUMN "tenant_id" SET DEFAULT NULLIF(current_setting('app.tenant_id', true), '')::text;
+```
+
+### 4. Connect as a role that row-level security applies to
+
+PostgreSQL skips row-level security for superusers and for roles with `BYPASSRLS`. If your app connects as the `postgres` superuser, or any role with `BYPASSRLS`, every policy is ignored. Run migrations as the owner, and give the app its own login role:
+
+```sql
+CREATE ROLE app_user LOGIN PASSWORD '...';
+GRANT USAGE ON SCHEMA public TO app_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_user;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO app_user;
+```
+
+`tenantGuard.assertSafe()` checks this for you. See [Check the database at startup](#check-the-database-at-startup).
+
+### 5. Use it in a request
+
+Build a principal from the verified token, then run the request's queries inside `withTenant()`. With Kinde's Next.js SDK, `getAccessToken()` returns the token's verified claims:
+
+```ts
+// app/api/projects/route.ts
+import { getKindeServerSession } from "@kinde-oss/kinde-auth-nextjs/server";
+import { isTenantGuardError, principalFromClaims } from "kinde-tenant-guard";
+import { tenantGuard } from "@/db/tenant-guard";
+import { invoices, projects } from "@/db/schema";
+
+export async function GET() {
+  const claims = await getKindeServerSession().getAccessToken();
+  if (!claims) return Response.json({ error: "Sign in first" }, { status: 401 });
+
+  try {
+    const data = await tenantGuard.withTenant(principalFromClaims(claims), async (tenant) => {
+      tenant.authorize("projects", "read");
+      return tenant.db.query.projects.findMany({ with: { invoices: true } });
+    });
+    return Response.json(data);
+  } catch (error) {
+    if (isTenantGuardError(error)) return Response.json({ error: error.message }, { status: error.status });
+    throw error;
+  }
+}
+```
+
+In any other server, verify the bearer token against your Kinde domain:
+
+```ts
+import { verifyKindeToken } from "kinde-tenant-guard";
+
+const principal = await verifyKindeToken(bearerToken, {
+  issuer: "https://acme.kinde.com",
+  audience: "https://api.acme.com",
+});
+```
+
+`tenant.db` is your Drizzle client inside one transaction, with the tenant set, so you write ordinary Drizzle queries and get only the tenant's rows. `tenant.table(projects)` offers the same operations as one-line helpers that also check your permission policies:
+
+```ts
+await tenantGuard.withTenant(principal, async (tenant) => {
+  const open = await tenant.table(projects).findMany({ where: eq(projects.name, "Portal") });
+  await tenant.table(projects).insert({ name: "Mobile app" }); // tenant stamped, needs projects:create
+  await tenant.table(projects).delete({ where: eq(projects.id, 7) }); // needs projects:delete
+});
+```
+
+## What is protected
+
+Every row below is a test that runs against a real PostgreSQL server, connected as an ordinary app role.
+
+| Case | Result |
+| --- | --- |
+| `select` with no `where` clause | Only the tenant's rows |
+| `insert` without a tenant column | Stamped with the tenant by the database |
+| `insert` that names another tenant | Refused by row-level security |
+| `update` that moves a row to another tenant | Refused by row-level security |
+| `update` or `delete` aimed at another tenant's row | Changes nothing |
+| `delete` with no filter | Deletes only the tenant's rows |
+| Upsert that conflicts with another tenant's row | Refused, and the other tenant's row is unchanged |
+| Joins, counts and relational queries | Only the tenant's rows on every table |
+| Relation from a tenant row to another tenant's row | Not returned |
+| Raw SQL and prepared statements | Only the tenant's rows |
+| Nested transactions and savepoints | Keep the tenant |
+| 24 concurrent requests from two organizations on a pool of 4 connections | Each sees only its own tenant |
+| A pooled connection after a request | Keeps no tenant, so a query outside the guard returns no rows |
+| A token with no `org_code` | Refused with `NO_ORGANIZATION` |
+| An organization with no tenant | Refused with `UNKNOWN_TENANT` |
+| A request parameter that names another organization | Refused with `ORGANIZATION_MISMATCH` |
+| A user who belongs to several organizations (`org_codes`) | Reaches only the active one, from `org_code` |
+
+The tenant is set with `set_config('app.tenant_id', ..., true)`. The `true` makes it local to the transaction, so when the transaction ends the connection goes back to the pool with no tenant.
+
+Row-level security protects you from a query that forgets its filter. It does not stop code that sets `app.tenant_id` itself with raw SQL. Keep tenant selection inside the guard.
+
+## Permissions
+
+Kinde decides who the user is and which permissions they have. Your policies decide what each permission allows:
+
+```ts
+const policies = definePolicies({
+  invoices: { tenant: "required", permissions: { read: "invoices:read", create: "invoices:create" } },
+  plans: { tenant: "global" },
+  billingAccounts: { tenant: "system" },
+});
+```
+
+| `tenant` | Meaning |
+| --- | --- |
+| `"required"` | Every operation belongs to the active tenant |
+| `"global"` | Shared by all tenants, such as a list of plans |
+| `"system"` | Only reachable through `withSystem()` |
+
+Access is refused unless it is allowed. An action without a permission in the policy is refused: `invoices` above has no `update`, so nobody can update invoices. A resource without a policy is refused with `POLICY_MISSING`. The tenant check and the permission check are separate: `projects:read` lets a user read projects in their active organization, never in another one.
+
+`tenant.table(...)` checks the policy for you. With `tenant.db`, call `tenant.authorize("invoices", "read")` first, or use `tenant.can()` to decide what to show.
+
+## Background jobs
+
+Jobs have no user token, so they use an explicit system context. It needs a reason, and each use sends an audit event:
+
+```ts
+// One tenant, for example a nightly job per organization
+await tenantGuard.withSystem({ reason: "nightly invoice reminders", tenantId: "t_acme" }, async (system) => {
+  await system.db.select().from(invoices);
+});
+
+// Every tenant, for example a platform report
+await tenantGuard.withSystem({ reason: "monthly revenue report" }, async (system) => {
+  await system.db.select().from(invoices);
+});
+```
+
+## SQLite, MySQL and databases without row-level security
+
+The Drizzle adapter works with SQLite and MySQL, but only PostgreSQL can enforce the boundary in the database. Without row-level security, the guard limits only the queries that go through `tenant.table(...)`, and `tenant.db` is not available, because a query on the raw client would not be limited to the tenant:
+
+```ts
+const tenantAdapter = drizzleAdapter(sqliteDb, { tables: { projects }, tenantColumn: "tenantId" });
+
+await tenantGuard.withTenant(principal, (tenant) => tenant.table(projects).findMany());
+```
+
+| Database | Protection |
+| --- | --- |
+| PostgreSQL, Neon, Supabase Postgres | Row-level security on every query, plus the scoped helpers |
+| SQLite, Turso, MySQL | The scoped helpers only |
+
+## Check the database at startup
+
+`verify()` checks that the database enforces isolation: the app's role is not a superuser and does not have `BYPASSRLS`, and every registered table has row-level security enabled, forced, and with the tenant policy. `assertSafe()` throws when a check fails, with the SQL that fixes it:
+
+```ts
+await tenantGuard.assertSafe();
+```
+
+```
+The database does not enforce tenant isolation:
+  - database role: The app connects as "postgres", which is a superuser, so PostgreSQL skips row-level security on every query.
+    Fix: Connect as a role without SUPERUSER or BYPASSRLS, ...
+```
+
+Run it when the server starts, or in CI against a copy of the production setup.
+
+## Audit events and errors
+
+Every refusal and every system access goes to `onAudit`:
+
+```ts
+createTenantGuard({
+  // ...
+  onAudit: (event) => logger.warn(event),
+});
+```
+
+```json
+{ "type": "access.denied", "code": "UNKNOWN_TENANT", "organizationCode": "org_initech", "subject": "kp_8f2c", "requestId": "...", "at": "..." }
+{ "type": "system.access", "reason": "nightly invoice reminders", "tenantId": "t_acme", "requestId": "...", "at": "..." }
+```
+
+Refusals are `TenantGuardError`s with a `code` and an HTTP `status`:
+
+| Code | Status | When |
+| --- | --- | --- |
+| `INVALID_PRINCIPAL` | 401 | The token did not verify, or the principal has no subject or issuer |
+| `NO_ORGANIZATION` | 403 | The token has no active organization |
+| `ORGANIZATION_MISMATCH` | 403 | The request asked for another organization than the token's |
+| `UNKNOWN_TENANT` | 403 | `resolveTenant()` found no tenant |
+| `FORBIDDEN` | 403 | A policy requires a permission the user does not have |
+| `POLICY_MISSING` | 403 | No policy covers the resource |
+| `CROSS_TENANT_WRITE` | 403 | A scoped insert or update named another tenant |
+| `UNSCOPED_TABLE` | 403 | A table that is not registered with the adapter |
+| `SYSTEM_REASON_REQUIRED` | 500 | `withSystem()` without a reason |
+| `UNSAFE_DATABASE` | 500 | `assertSafe()` found a problem |
+
+## Testing with kinde-testkit
+
+[kinde-testkit](https://www.npmjs.com/package/kinde-testkit) mints real Kinde-shaped tokens for any organization and permission set, so you can prove isolation in your own test suite. This package's tests do the same:
+
+```ts
+import { scenario, KindeTestkit } from "kinde-testkit";
+import { principalFromClaims } from "kinde-tenant-guard";
+
+const testkit = await KindeTestkit.create({ issuer: "https://acme.kinde.test" });
+
+async function principal(org: string, permissions: string[]) {
+  const token = await testkit.tokenFor(scenario().user({ email: `${org}@example.test` }).organization(org).permissions(permissions).authenticated());
+  return principalFromClaims(await testkit.verify(token!));
+}
+
+it("Globex cannot see Acme's invoices", async () => {
+  const rows = await tenantGuard.withTenant(await principal("org_globex", ["invoices:read"]), (t) => t.db.select().from(invoices));
+  expect(rows.every((r) => r.tenantId === "t_globex")).toBe(true);
+});
+```
+
+## API
+
+From `kinde-tenant-guard`:
+
+- `createTenantGuard({ adapter, resolveTenant, policies, onAudit })` returns `{ withTenant, withSystem, verify, assertSafe }`.
+- `withTenant(principal, fn, { requestId, organizationCode })` runs `fn(tenant)`. `tenant` has the adapter's scope, plus `context`, `can(resource, action)` and `authorize(resource, action)`.
+- `withSystem({ reason, tenantId }, fn)` runs `fn(system)` with system access.
+- `principalFromClaims(claims)` and `verifyKindeToken(token, { issuer, audience })` build a `KindePrincipal`. Machine-to-machine tokens become `{ type: "machine", subject: <client ID> }`.
+- `definePolicies(policies)`, `TenantGuardError` and `isTenantGuardError(error, code)`.
+
+From `kinde-tenant-guard/drizzle`:
+
+- `drizzleAdapter(db, { tables, tenantColumn, rls })`. `rls` is on by default for PostgreSQL. The adapter has `migrationSql()` and `verify()`.
+- The scope has `db` (the transaction, with row-level security only) and `table(t)`, which returns `findMany`, `findFirst`, `count`, `insert`, `update` and `delete`.
+- `tenantIdColumn(name)` and `tenantRlsSql(tables, tenantColumn)`.
+
+## What this release covers
+
+| Capability | Status |
+| --- | --- |
+| Kinde principal from verified claims or a token, including M2M | Implemented |
+| Fail-closed tenant resolution | Implemented |
+| Permission policies with required, global and system resources | Implemented |
+| System context for background jobs, with audit events | Implemented |
+| Drizzle with PostgreSQL row-level security | Implemented, tested against PostgreSQL 17 with pooled connections |
+| Drizzle scoped helpers for SQLite and MySQL | Implemented, tested with SQLite |
+| Startup check for roles and policies | Implemented |
+| Prisma adapter | Not yet |
+| Convex adapter | Not yet |
+
+## License
+
+MIT
