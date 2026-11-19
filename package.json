@@ -1,6 +1,6 @@
 {
   "name": "kinde-tenant-guard",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Keep each Kinde organization's data separate. Scopes every database query to the signed-in user's active Kinde organization, with PostgreSQL row-level security as the boundary where it exists. Adapters for Drizzle, Prisma and Convex, isolation tests built on kinde-testkit, an ESLint rule, and tenant-safe AI agent tools.",
   "type": "module",
   "license": "MIT",
@@ -26,10 +26,11 @@
     "convex",
     "eslint-plugin",
     "ai-agents",
-    "testing"
+    "testing",
+    "cli"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=20.19"
   },
   "files": [
     "dist",
@@ -108,6 +109,16 @@
         "default": "./dist/eslint.cjs"
       }
     },
+    "./check": {
+      "import": {
+        "types": "./dist/check.d.ts",
+        "default": "./dist/check.js"
+      },
+      "require": {
+        "types": "./dist/check.d.cts",
+        "default": "./dist/check.cjs"
+      }
+    },
     "./package.json": "./package.json"
   },
   "main": "./dist/index.cjs",
@@ -125,8 +136,9 @@
     "@prisma/client": ">=7",
     "convex": ">=1.46",
     "drizzle-orm": ">=0.36",
+    "eslint": ">=9",
     "kinde-testkit": ">=0.8",
-    "eslint": ">=9"
+    "pg": ">=8"
   },
   "peerDependenciesMeta": {
     "drizzle-orm": {
@@ -143,9 +155,13 @@
     },
     "eslint": {
       "optional": true
+    },
+    "pg": {
+      "optional": true
     }
   },
   "dependencies": {
+    "@babel/parser": "^8.1.2",
     "jose": "^6.2.17"
   },
   "devDependencies": {
@@ -168,5 +184,8 @@
     "tsup": "^8.5.1",
     "typescript": "^5.9.3",
     "vitest": "^5.1.1"
+  },
+  "bin": {
+    "kinde-tenant-guard": "./dist/cli.js"
   }
 }

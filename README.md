@@ -19,6 +19,7 @@ Keep each Kinde organization's data separate. kinde-tenant-guard takes the activ
 - [Audit events and errors](#audit-events-and-errors)
 - [Prove isolation with testIsolation()](#prove-isolation-with-testisolation)
 - [Lint for database access outside the guard](#lint-for-database-access-outside-the-guard)
+- [Check a project from the command line](#check-a-project-from-the-command-line)
 - [AI agent tools](#ai-agent-tools)
 - [API](#api)
 - [What this release covers](#what-this-release-covers)
@@ -48,7 +49,7 @@ kinde-tenant-guard moves the filter out of your route code:
 npm install kinde-tenant-guard
 ```
 
-Node 20 or later. The Drizzle adapter needs `drizzle-orm` 0.36 or later, the Prisma adapter needs Prisma 7 or later with a driver adapter, such as `@prisma/adapter-pg`, and the Convex adapter needs `convex` 1.46 or later.
+Node 20.19 or later. The Drizzle adapter needs `drizzle-orm` 0.36 or later, the Prisma adapter needs Prisma 7 or later with a driver adapter, such as `@prisma/adapter-pg`, and the Convex adapter needs `convex` 1.46 or later.
 
 ## Quick start with Drizzle and PostgreSQL
 
@@ -550,6 +551,48 @@ The rule allows the raw client where the guard needs it: in the arguments to `cr
 { rules: { "kinde-tenant-guard/no-unguarded-db": ["error", { clients: ["database"], convexContexts: ["ctx"] }] } }
 ```
 
+## Check a project from the command line
+
+`kinde-tenant-guard check` looks for isolation problems across a whole project, with no ESLint setup:
+
+```bash
+npx kinde-tenant-guard check
+```
+
+```
+src/routes/invoices.ts:14:9  error  `db` is the raw database client, so this query is not limited to a tenant. ...  [no-unguarded-db]
+src/db/schema.ts:31:14  error  The "notes" table has a "tenantId" column but is not registered with drizzleAdapter(), so the guard does not protect it. Add `notes` to tables.  [unregistered-tenant-table]
+
+2 errors and 0 warnings in 48 files.
+```
+
+| Rule | Severity | Finds |
+| --- | --- | --- |
+| `no-unguarded-db` | error | Raw client calls and Convex `ctx.db` outside the guard, the same as the ESLint rule |
+| `unregistered-tenant-table` | error | A Drizzle table, Prisma model or Convex table with the tenant field that the guard does not cover |
+| `missing-tenant-column` | error | A registered table or model without the tenant field |
+| `missing-tenant-index` | error | A registered Convex table without an index that starts with the tenant field |
+| `missing-tenant-default` | warning | A Prisma tenant field on PostgreSQL without the `dbgenerated` default, so nested creates are not stamped |
+| `unknown-table` | warning | A registered table the checker could not find in the code, so it was not checked |
+
+It reads your `drizzleAdapter()`, `prismaAdapter()` and `convexTenantGuard()` calls to learn the tenant field and the registered tables, then compares them with your `pgTable()` calls, `schema.prisma` models and Convex `defineSchema()`.
+
+To check the live database too, give it a connection string. It runs the same checks as `verify()` on the registered tables: the role cannot skip row-level security, and each table has row-level security enabled, forced, and the tenant policy. This needs the `pg` package:
+
+```bash
+npx kinde-tenant-guard check --database-url "$DATABASE_URL"
+```
+
+Options:
+
+- `--json` prints the report as JSON, for CI and coding agents.
+- `--ignore <glob>` skips paths, such as `--ignore "scripts/**"` for seed scripts that use the raw client on purpose. Repeat it for more.
+- `--include-tests` checks test files, which are skipped by default because tests often seed data with the raw client.
+- `--client <name>` and `--convex-context <name>` change the names the `no-unguarded-db` rule looks for.
+- `// eslint-disable-next-line kinde-tenant-guard/no-unguarded-db` skips one line, the same as in ESLint.
+
+The command exits with 1 when it finds an error or the database check fails, so it can block a merge in CI. The same check runs from code with `checkProject()` from `kinde-tenant-guard/check`.
+
 ## AI agent tools
 
 An agent that reads or changes tenant data is one prompt injection away from asking for another tenant's records. `defineTenantTools()` makes the tenant come from the signed-in user, never from the model:
@@ -632,6 +675,10 @@ From `kinde-tenant-guard/agents`:
 
 - `defineTenantTools(guard, definitions, { forbiddenInputKeys })` returns `{ forPrincipal, definitions }`. `forPrincipal(principal)` returns `{ available, tools, call }`.
 
+From `kinde-tenant-guard/check`:
+
+- `checkProject({ cwd, paths, ignore, includeTests, clients, convexContexts, databaseUrl })` returns `{ ok, files, findings, database }`.
+
 From `kinde-tenant-guard/eslint`:
 
 - The default export is the ESLint plugin, with `configs.recommended` and the `no-unguarded-db` rule.
@@ -653,6 +700,7 @@ From `kinde-tenant-guard/eslint`:
 | Isolation tests with `testIsolation()` | Implemented, tested on Drizzle with PostgreSQL and on Convex |
 | ESLint rule for database access outside the guard | Implemented, tested with ESLint 10 |
 | Tenant-safe AI agent tools | Implemented, tested on Drizzle with PostgreSQL |
+| `kinde-tenant-guard check` command for code, schemas and the live database | Implemented, tested on Drizzle, Prisma and Convex projects and PostgreSQL 17 |
 
 ## License
 

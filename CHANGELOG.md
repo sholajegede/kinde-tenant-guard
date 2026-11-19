@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0
+
+- Add the `kinde-tenant-guard check` command. It finds database access outside the guard, tenant tables and models the guard does not cover, registered tables without the tenant field, and Convex tenant tables without a tenant index. With `--database-url`, it also checks row-level security in the live database. `--json` prints the report for CI and coding agents, and it exits with 1 on an error.
+- Add `checkProject()` in `kinde-tenant-guard/check`, the same check from code.
+- The ESLint rule and the command share one detector, so they flag the same code.
+- Node 20.19 or later is now required, for the parser the command uses.
+
 ## 0.4.0
 
 - Add `testIsolation()` in `kinde-tenant-guard/testing`. It mints a token for two organizations with kinde-testkit, creates a record as each, and checks reads, reads by ID, updates and deletes across the boundary. It throws a `TenantIsolationError` that names each leak. Without a guard it calls your app through convex-test or HTTP.
