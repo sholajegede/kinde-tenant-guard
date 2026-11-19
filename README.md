@@ -1,6 +1,6 @@
 # kinde-tenant-guard
 
-Keep each Kinde organization's data separate. kinde-tenant-guard takes the active organization from a verified Kinde token and limits every database query to that organization's rows. On PostgreSQL, row-level security enforces it, so a query that forgets its filter still cannot read or change another organization's data.
+Keep each Kinde organization's data separate. kinde-tenant-guard takes the active organization from a verified Kinde token and limits every database query to that organization's rows. On PostgreSQL, row-level security enforces it, so a query that forgets its filter still cannot read or change another organization's data. It works with Drizzle and Prisma.
 
 ![How kinde-tenant-guard works: a verified Kinde token with org_code goes to Tenant Guard, which resolves the tenant and checks permissions, sets app.tenant_id for one transaction, and PostgreSQL row-level security limits every query to that tenant's rows](https://raw.githubusercontent.com/sholajegede/kinde-tenant-guard/main/docs/how-it-works.png)
 
@@ -9,6 +9,7 @@ Keep each Kinde organization's data separate. kinde-tenant-guard takes the activ
 - [Why it exists](#why-it-exists)
 - [Install](#install)
 - [Quick start with Drizzle and PostgreSQL](#quick-start-with-drizzle-and-postgresql)
+- [Quick start with Prisma and PostgreSQL](#quick-start-with-prisma-and-postgresql)
 - [What is protected](#what-is-protected)
 - [Permissions](#permissions)
 - [Background jobs](#background-jobs)
@@ -44,7 +45,7 @@ kinde-tenant-guard moves the filter out of your route code:
 npm install kinde-tenant-guard
 ```
 
-Node 20 or later. The Drizzle adapter needs `drizzle-orm` 0.36 or later, which your app already has.
+Node 20 or later. The Drizzle adapter needs `drizzle-orm` 0.36 or later, and the Prisma adapter needs Prisma 7 or later with a driver adapter, such as `@prisma/adapter-pg`.
 
 ## Quick start with Drizzle and PostgreSQL
 
@@ -184,29 +185,85 @@ await tenantGuard.withTenant(principal, async (tenant) => {
 });
 ```
 
+## Quick start with Prisma and PostgreSQL
+
+Steps 3 and 4 above, the migration and the app role, are the same for Prisma. The differences are the schema and the adapter.
+
+### 1. Give each tenant model a tenant field that defaults to the transaction's tenant
+
+```prisma
+model Project {
+  id       Int       @id @default(autoincrement())
+  tenantId String    @default(dbgenerated("NULLIF(current_setting('app.tenant_id', true), '')")) @map("tenant_id")
+  name     String
+  invoices Invoice[]
+}
+
+model Invoice {
+  id        Int     @id @default(autoincrement())
+  tenantId  String  @default(dbgenerated("NULLIF(current_setting('app.tenant_id', true), '')")) @map("tenant_id")
+  projectId Int
+  amount    Int
+  project   Project @relation(fields: [projectId], references: [id])
+}
+```
+
+The default lets PostgreSQL stamp the tenant on every insert, including nested creates, so your code never sets `tenantId`.
+
+### 2. Create the guard
+
+```ts
+import { createTenantGuard } from "kinde-tenant-guard";
+import { prismaAdapter } from "kinde-tenant-guard/prisma";
+import { prisma } from "./prisma";
+
+export const tenantAdapter = prismaAdapter(prisma, {
+  models: { projects: "Project", invoices: "Invoice" },
+  tenantField: "tenantId",
+});
+
+export const tenantGuard = createTenantGuard({
+  adapter: tenantAdapter,
+  resolveTenant: async (orgCode) => (await prisma.tenant.findUnique({ where: { kindeOrgCode: orgCode } }))?.id ?? null,
+  policies, // the same definePolicies() as above
+});
+```
+
+Create a migration with `npx prisma migrate dev --create-only --name tenant_guard`, paste in `tenantAdapter.migrationSql()`, and apply it.
+
+### 3. Use it in a request
+
+```ts
+const projects = await tenantGuard.withTenant(principal, (tenant) =>
+  tenant.db.project.findMany({ include: { invoices: true } }),
+);
+```
+
+`tenant.db` is your Prisma client inside one transaction, with the tenant set. A query extension also adds the tenant to every `where`, stamps `create`, `createMany` and `upsert`, refuses data that names another tenant, and checks your policies on every operation: `tenant.db.project.deleteMany()` needs `projects:delete`. The client refuses to run once the `withTenant()` callback has finished. Each scope is one interactive transaction, and Prisma's default timeout is 5 seconds. Pass `transactionOptions: { timeout: 15000 }` to `prismaAdapter()` for longer requests.
+
 ## What is protected
 
 Every row below is a test that runs against a real PostgreSQL server, connected as an ordinary app role.
 
-| Case | Result |
-| --- | --- |
-| `select` with no `where` clause | Only the tenant's rows |
-| `insert` without a tenant column | Stamped with the tenant by the database |
-| `insert` that names another tenant | Refused by row-level security |
-| `update` that moves a row to another tenant | Refused by row-level security |
-| `update` or `delete` aimed at another tenant's row | Changes nothing |
-| `delete` with no filter | Deletes only the tenant's rows |
-| Upsert that conflicts with another tenant's row | Refused, and the other tenant's row is unchanged |
-| Joins, counts and relational queries | Only the tenant's rows on every table |
-| Relation from a tenant row to another tenant's row | Not returned |
-| Raw SQL and prepared statements | Only the tenant's rows |
-| Nested transactions and savepoints | Keep the tenant |
-| 24 concurrent requests from two organizations on a pool of 4 connections | Each sees only its own tenant |
-| A pooled connection after a request | Keeps no tenant, so a query outside the guard returns no rows |
-| A token with no `org_code` | Refused with `NO_ORGANIZATION` |
-| An organization with no tenant | Refused with `UNKNOWN_TENANT` |
-| A request parameter that names another organization | Refused with `ORGANIZATION_MISMATCH` |
-| A user who belongs to several organizations (`org_codes`) | Reaches only the active one, from `org_code` |
+| Case | Result | Tested with |
+| --- | --- | --- |
+| `select` or `findMany` with no `where` clause | Only the tenant's rows | Drizzle, Prisma |
+| Insert without a tenant value, including nested creates | Stamped with the tenant by the database | Drizzle, Prisma |
+| Insert that names another tenant | Refused | Drizzle, Prisma |
+| Update that moves a row to another tenant | Refused | Drizzle, Prisma |
+| Update or delete aimed at another tenant's row | Changes nothing | Drizzle, Prisma |
+| Delete with no filter | Deletes only the tenant's rows | Drizzle, Prisma |
+| Upsert that conflicts with another tenant's row | The other tenant's row is unchanged | Drizzle, Prisma |
+| Joins, counts, aggregates, `groupBy` and relational queries | Only the tenant's rows on every table | Drizzle, Prisma |
+| Relation from a tenant row to another tenant's row | Not returned | Drizzle, Prisma |
+| Raw SQL | Only the tenant's rows | Drizzle, Prisma |
+| Prepared statements, nested transactions and savepoints | Only the tenant's rows | Drizzle |
+| 24 concurrent requests from two organizations on a pool of 4 connections | Each sees only its own tenant | Drizzle, Prisma |
+| A pooled connection after a request | Keeps no tenant, so a query outside the guard returns no rows | Drizzle |
+| A token with no `org_code` | Refused with `NO_ORGANIZATION` | Both, in the core |
+| An organization with no tenant | Refused with `UNKNOWN_TENANT` | Both, in the core |
+| A request parameter that names another organization | Refused with `ORGANIZATION_MISMATCH` | Both, in the core |
+| A user who belongs to several organizations (`org_codes`) | Reaches only the active one, from `org_code` | Both, in the core |
 
 The tenant is set with `set_config('app.tenant_id', ..., true)`. The `true` makes it local to the transaction, so when the transaction ends the connection goes back to the pool with no tenant.
 
@@ -260,10 +317,12 @@ const tenantAdapter = drizzleAdapter(sqliteDb, { tables: { projects }, tenantCol
 await tenantGuard.withTenant(principal, (tenant) => tenant.table(projects).findMany());
 ```
 
+The Prisma adapter keeps `tenant.db` on SQLite and MySQL, because its query extension adds the tenant to every operation on a registered model. It refuses what it cannot limit: `include` or `select` of a relation to a tenant model, nested writes to one, and raw SQL. Query and write those models on their own instead.
+
 | Database | Protection |
 | --- | --- |
-| PostgreSQL, Neon, Supabase Postgres | Row-level security on every query, plus the scoped helpers |
-| SQLite, Turso, MySQL | The scoped helpers only |
+| PostgreSQL, Neon, Supabase Postgres | Row-level security on every query, plus the adapter's own filters |
+| SQLite, Turso, MySQL | The adapter's filters only: Drizzle's scoped helpers, or Prisma's query extension |
 
 ## Check the database at startup
 
@@ -310,6 +369,7 @@ Refusals are `TenantGuardError`s with a `code` and an HTTP `status`:
 | `CROSS_TENANT_WRITE` | 403 | A scoped insert or update named another tenant |
 | `UNSCOPED_TABLE` | 403 | A table that is not registered with the adapter |
 | `SYSTEM_REASON_REQUIRED` | 500 | `withSystem()` without a reason |
+| `UNSAFE_QUERY` | 403 | A query the adapter cannot limit, such as raw SQL without row-level security, or use of the Prisma client after its scope ended |
 | `UNSAFE_DATABASE` | 500 | `assertSafe()` found a problem |
 
 ## Testing with kinde-testkit
@@ -349,6 +409,12 @@ From `kinde-tenant-guard/drizzle`:
 - The scope has `db` (the transaction, with row-level security only) and `table(t)`, which returns `findMany`, `findFirst`, `count`, `insert`, `update` and `delete`.
 - `tenantIdColumn(name)` and `tenantRlsSql(tables, tenantColumn)`.
 
+From `kinde-tenant-guard/prisma`:
+
+- `prismaAdapter(prisma, { models, tenantField, rls, tenantColumnType, transactionOptions })`. `rls` is on by default when the client uses PostgreSQL. The adapter has `migrationSql()` and `verify()`.
+- The scope has `db`, the guarded Prisma client.
+- `TENANT_DEFAULT_SQL`, the expression for `@default(dbgenerated(...))`.
+
 ## What this release covers
 
 | Capability | Status |
@@ -360,7 +426,8 @@ From `kinde-tenant-guard/drizzle`:
 | Drizzle with PostgreSQL row-level security | Implemented, tested against PostgreSQL 17 with pooled connections |
 | Drizzle scoped helpers for SQLite and MySQL | Implemented, tested with SQLite |
 | Startup check for roles and policies | Implemented |
-| Prisma adapter | Not yet |
+| Prisma with PostgreSQL row-level security | Implemented, tested against PostgreSQL 17 with Prisma 7 |
+| Prisma query extension for SQLite and MySQL | Implemented, tested with SQLite |
 | Convex adapter | Not yet |
 
 ## License

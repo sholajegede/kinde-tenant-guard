@@ -3,3 +3,5 @@ dist
 *.tgz
 *.tsbuildinfo
 .DS_Store
+test/prisma/generated
+test/prisma/generated-sqlite

@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0
+
+- Add the Prisma adapter, `kinde-tenant-guard/prisma`, for Prisma 7. A query extension adds the tenant to every operation on the registered models, stamps creates and upserts, refuses data that names another tenant, and checks the policy for each operation. On PostgreSQL each scope runs in one interactive transaction with the tenant set, so row-level security also limits nested reads and raw SQL.
+- Without row-level security, the Prisma adapter refuses relation reads and nested writes to tenant models, and raw SQL, because it cannot limit them.
+- The guarded Prisma client refuses to run after its `withTenant()` scope has finished.
+- Add the `UNSAFE_QUERY` error code.
+- The PostgreSQL policy SQL and startup checks are shared by both adapters.
+
 ## 0.1.0
 
 First release.

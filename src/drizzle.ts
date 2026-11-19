@@ -1,16 +1,10 @@
 import { and, eq, getTableName, is, sql, Table, type InferInsertModel, type InferSelectModel, type SQL } from "drizzle-orm";
 import { getTableConfig, PgDatabase, PgTable, text } from "drizzle-orm/pg-core";
 import { TenantGuardError } from "./errors.js";
-import type { ScopeHooks, SystemContext, TenantAdapter, TenantContext, VerifyCheck, VerifyResult } from "./guard.js";
+import type { ScopeHooks, SystemContext, TenantAdapter, TenantContext, VerifyResult } from "./guard.js";
+import { currentTenant, rlsSql, SYSTEM_SETTING, TENANT_SETTING, verifyPostgres, type PostgresTenantTable } from "./postgres.js";
 
-/** The PostgreSQL setting that holds the active tenant for the current transaction. */
-export const TENANT_SETTING = "app.tenant_id";
-/** The PostgreSQL setting withSystem() turns on to reach every tenant. */
-export const SYSTEM_SETTING = "app.tenant_guard_system";
-/** The name of the policy the generated SQL creates on each table. */
-export const POLICY_NAME = "tenant_guard_isolation";
-
-const currentTenant = (cast: string) => `NULLIF(current_setting('${TENANT_SETTING}', true), '')::${cast}`;
+export { POLICY_NAME, SYSTEM_SETTING, TENANT_SETTING } from "./postgres.js";
 
 /**
  * A text column that defaults to the transaction's tenant, so inserts made through the guard are
@@ -87,11 +81,11 @@ function rowsOf(result: unknown): Record<string, unknown>[] {
   return Array.isArray(rows) ? (rows as Record<string, unknown>[]) : [];
 }
 
-function qualifiedName(table: Table): { schema: string; name: string; sql: string } {
+function describe(resource: string, table: Table, tenantColumn: string): PostgresTenantTable {
   const config = is(table, PgTable) ? getTableConfig(table) : null;
-  const schema = config?.schema ?? "public";
-  const name = getTableName(table);
-  return { schema, name, sql: `"${schema.replace(/"/g, '""')}"."${name.replace(/"/g, '""')}"` };
+  const column = (table as unknown as Record<string, { name: string; getSQLType(): string } | undefined>)[tenantColumn];
+  if (!column) throw new Error(`kinde-tenant-guard: the "${resource}" table has no "${tenantColumn}" column.`);
+  return { resource, schema: config?.schema ?? "public", name: getTableName(table), column: column.name, type: column.getSQLType() };
 }
 
 /** Wraps a Drizzle database so every tenant scope reaches only one tenant's rows. */
@@ -241,59 +235,19 @@ export function drizzleAdapter<DB extends AnyDatabase, const Tables extends Reco
           checks: [{ name: "row-level security", ok: true, detail: "Off. Only the scoped table helpers limit queries to the tenant, so do not use the database client directly for tenant data." }],
         };
       }
-      const execute = (query: SQL) => (db as unknown as { execute(query: SQL): Promise<unknown> }).execute(query).then(rowsOf);
-      const checks: VerifyCheck[] = [];
-      const [role] = await execute(sql`select current_user as name, r.rolsuper as super, r.rolbypassrls as bypass from pg_roles r where r.rolname = current_user`);
-      const bypasses = Boolean(role?.super) || Boolean(role?.bypass);
-      checks.push({
-        name: "database role",
-        ok: !bypasses,
-        detail: bypasses
-          ? `The app connects as "${String(role?.name)}", which ${role?.super ? "is a superuser" : "has BYPASSRLS"}, so PostgreSQL skips row-level security on every query.`
-          : `The app connects as "${String(role?.name)}", which row-level security applies to.`,
-        ...(bypasses ? { fix: `Connect as a role without SUPERUSER or BYPASSRLS, for example: CREATE ROLE app_user LOGIN PASSWORD '...'; GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO app_user;` } : {}),
-      });
-      for (const [resource, table] of Object.entries(options.tables)) {
-        const { schema, name, sql: qualified } = qualifiedName(table);
-        const [state] = await execute(sql`select c.relrowsecurity as enabled, c.relforcerowsecurity as forced from pg_class c where c.oid = to_regclass(${qualified})`);
-        const [policy] = await execute(sql`select count(*)::int as count from pg_policies where schemaname = ${schema} and tablename = ${name} and policyname = ${POLICY_NAME}`);
-        const ok = Boolean(state?.enabled) && Boolean(state?.forced) && Number(policy?.count) > 0;
-        checks.push({
-          name: `${resource} (${schema}.${name})`,
-          ok,
-          detail: !state
-            ? "The table does not exist."
-            : ok
-              ? "Row-level security is enabled and forced, with the tenant policy."
-              : `Row-level security is ${state.enabled ? "enabled" : "not enabled"}, ${state.forced ? "forced" : "not forced"}, and the ${POLICY_NAME} policy is ${Number(policy?.count) > 0 ? "present" : "missing"}.`,
-          ...(ok ? {} : { fix: "Run the SQL from adapter.migrationSql() in a migration." }),
-        });
-      }
-      return { ok: checks.every((c) => c.ok), checks };
+      const execute = (db as unknown as { execute(query: SQL): Promise<unknown> }).execute.bind(db);
+      return verifyPostgres(async (text, params) => {
+        // Turn $1, $2 placeholders into Drizzle parameters.
+        const chunks = text.split(/\$(\d+)/);
+        let query = sql.raw(chunks[0]!);
+        for (let i = 1; i < chunks.length; i += 2) query = sql`${query}${params[Number(chunks[i]) - 1]}${sql.raw(chunks[i + 1]!)}`;
+        return rowsOf(await execute(query));
+      }, Object.entries(options.tables).map(([resource, table]) => describe(resource, table, options.tenantColumn)));
     },
   };
 }
 
 /** The SQL that enables, forces and adds the tenant policy on each table, and stamps new rows with the tenant. */
 export function tenantRlsSql(tables: Record<string, Table>, tenantColumn: string): string {
-  const parts = ["-- Generated by kinde-tenant-guard. Each tenant table only shows and accepts rows for the tenant in app.tenant_id."];
-  for (const [resource, table] of Object.entries(tables)) {
-    const { sql: qualified } = qualifiedName(table);
-    const column = (table as unknown as Record<string, { name: string; getSQLType(): string }>)[tenantColumn];
-    if (!column) throw new Error(`kinde-tenant-guard: the "${resource}" table has no "${tenantColumn}" column.`);
-    const col = `"${column.name.replace(/"/g, '""')}"`;
-    const cast = column.getSQLType();
-    const rule = `${col} = ${currentTenant(cast)} OR current_setting('${SYSTEM_SETTING}', true) = 'on'`;
-    parts.push(
-      [
-        `-- ${resource}`,
-        `ALTER TABLE ${qualified} ENABLE ROW LEVEL SECURITY;`,
-        `ALTER TABLE ${qualified} FORCE ROW LEVEL SECURITY;`,
-        `DROP POLICY IF EXISTS ${POLICY_NAME} ON ${qualified};`,
-        `CREATE POLICY ${POLICY_NAME} ON ${qualified} FOR ALL USING (${rule}) WITH CHECK (${rule});`,
-        `ALTER TABLE ${qualified} ALTER COLUMN ${col} SET DEFAULT ${currentTenant(cast)};`,
-      ].join("\n"),
-    );
-  }
-  return `${parts.join("\n\n")}\n`;
+  return rlsSql(Object.entries(tables).map(([resource, table]) => describe(resource, table, tenantColumn)));
 }

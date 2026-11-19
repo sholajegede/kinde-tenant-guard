@@ -15,6 +15,8 @@ export type TenantGuardErrorCode =
   | "CROSS_TENANT_WRITE"
   /** A table that is not registered with the adapter was used in a tenant scope. */
   | "UNSCOPED_TABLE"
+  /** A query the adapter cannot limit to the tenant, such as raw SQL without row-level security. */
+  | "UNSAFE_QUERY"
   /** withSystem() was called without a reason. */
   | "SYSTEM_REASON_REQUIRED"
   /** The database is not set up to enforce isolation, found by verify(). */
