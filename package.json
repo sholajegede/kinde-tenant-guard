@@ -186,6 +186,6 @@
     "vitest": "^5.1.1"
   },
   "bin": {
-    "kinde-tenant-guard": "./dist/cli.js"
+    "kinde-tenant-guard": "dist/cli.js"
   }
 }
