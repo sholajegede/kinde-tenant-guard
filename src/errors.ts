@@ -17,6 +17,8 @@ export type TenantGuardErrorCode =
   | "UNSCOPED_TABLE"
   /** A query the adapter cannot limit to the tenant, such as raw SQL without row-level security. */
   | "UNSAFE_QUERY"
+  /** An agent tool call carried a tenant or organization in its input, or named an unknown tool. */
+  | "UNSAFE_TOOL_INPUT"
   /** withSystem() was called without a reason. */
   | "SYSTEM_REASON_REQUIRED"
   /** The database is not set up to enforce isolation, found by verify(). */

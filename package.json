@@ -1,7 +1,7 @@
 {
   "name": "kinde-tenant-guard",
-  "version": "0.3.0",
-  "description": "Keep each Kinde organization's data separate. Scopes every database query to the signed-in user's active Kinde organization, with PostgreSQL row-level security as the boundary where it exists. Adapters for Drizzle, Prisma and Convex.",
+  "version": "0.4.0",
+  "description": "Keep each Kinde organization's data separate. Scopes every database query to the signed-in user's active Kinde organization, with PostgreSQL row-level security as the boundary where it exists. Adapters for Drizzle, Prisma and Convex, isolation tests built on kinde-testkit, an ESLint rule, and tenant-safe AI agent tools.",
   "type": "module",
   "license": "MIT",
   "author": "Shola Jegede",
@@ -23,7 +23,10 @@
     "saas",
     "organizations",
     "prisma",
-    "convex"
+    "convex",
+    "eslint-plugin",
+    "ai-agents",
+    "testing"
   ],
   "engines": {
     "node": ">=20"
@@ -75,6 +78,36 @@
         "default": "./dist/convex.cjs"
       }
     },
+    "./testing": {
+      "import": {
+        "types": "./dist/testing.d.ts",
+        "default": "./dist/testing.js"
+      },
+      "require": {
+        "types": "./dist/testing.d.cts",
+        "default": "./dist/testing.cjs"
+      }
+    },
+    "./agents": {
+      "import": {
+        "types": "./dist/agents.d.ts",
+        "default": "./dist/agents.js"
+      },
+      "require": {
+        "types": "./dist/agents.d.cts",
+        "default": "./dist/agents.cjs"
+      }
+    },
+    "./eslint": {
+      "import": {
+        "types": "./dist/eslint.d.ts",
+        "default": "./dist/eslint.js"
+      },
+      "require": {
+        "types": "./dist/eslint.d.cts",
+        "default": "./dist/eslint.cjs"
+      }
+    },
     "./package.json": "./package.json"
   },
   "main": "./dist/index.cjs",
@@ -90,8 +123,10 @@
   },
   "peerDependencies": {
     "@prisma/client": ">=7",
+    "convex": ">=1.46",
     "drizzle-orm": ">=0.36",
-    "convex": ">=1.46"
+    "kinde-testkit": ">=0.8",
+    "eslint": ">=9"
   },
   "peerDependenciesMeta": {
     "drizzle-orm": {
@@ -101,6 +136,12 @@
       "optional": true
     },
     "convex": {
+      "optional": true
+    },
+    "kinde-testkit": {
+      "optional": true
+    },
+    "eslint": {
       "optional": true
     }
   },
@@ -120,6 +161,7 @@
     "convex-test": "^0.0.73",
     "drizzle-orm": "^0.45.4",
     "embedded-postgres": "17.11.0-beta.19",
+    "eslint": "^10.15.0",
     "kinde-testkit": "^0.8.0",
     "pg": "^8.23.1",
     "prisma": "7.10.1",

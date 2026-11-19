@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 import { convexTenantGuard } from "../src/convex.js";
+import { testIsolation, type IsolationOrganization } from "../src/testing.js";
 import { audit } from "./convex/guard.js";
 import schema from "./convex/schema.js";
 
@@ -149,5 +150,27 @@ describe("convex setup checks", () => {
     const bad = defineSchema({ notes: defineTable({ tenantId: v.string() }).index("by_other", ["tenantId_x" as never]) });
     expect(() => convexTenantGuard({ schema: bad, tables: ["notes"], tenantField: "tenantId", resolveTenant: () => null })).toThrow(/needs an index that starts with "tenantId"/);
     expect(() => convexTenantGuard({ schema, tables: ["missing"], tenantField: "tenantId", resolveTenant: () => null })).toThrow(/no "missing" table/);
+  });
+});
+
+describe("testIsolation() through convex-test", () => {
+  it("passes for functions that use the tenant database", async () => {
+    let n = 0;
+    const as = (org: IsolationOrganization) => env.t.withIdentity(org.identity);
+    const report = await testIsolation({
+      organizations: ["org_acme", "org_globex"],
+      permissions: all,
+      resources: {
+        projects: {
+          create: (org) => as(org).mutation(api.isoCreate, { slug: `iso-${++n}` }),
+          list: (org) => as(org).query(api.isoList, {}),
+          get: (org, id) => as(org).query(api.isoGet, { id: String(id) }),
+          update: (org, row) => as(org).mutation(api.isoUpdate, { id: row._id }),
+          remove: (org, row) => as(org).mutation(api.isoRemove, { id: row._id }),
+        },
+      },
+    });
+    expect(report.checks.filter((c) => c.ok)).toHaveLength(report.checks.length);
+    expect(report.checks.map((c) => c.operation)).toEqual(["create", "read", "read", "get", "update", "delete"]);
   });
 });

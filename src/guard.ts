@@ -74,6 +74,8 @@ export type TenantSession<Scope> = Scope & {
   can(resource: string, action: TenantAction): boolean;
   /** Throws a FORBIDDEN TenantGuardError unless the principal may perform the action. */
   authorize(resource: string, action: TenantAction): void;
+  /** Writes a refusal of your own to the audit log and returns the error, so you can throw it. */
+  deny(error: TenantGuardError): TenantGuardError;
 };
 
 export type SystemSession<Scope> = Scope & { readonly context: SystemContext };
@@ -106,6 +108,13 @@ export interface TenantGuard<Scope> {
   withTenant<T>(principal: KindePrincipal, fn: (tenant: TenantSession<Scope>) => Promise<T>, options?: WithTenantOptions): Promise<T>;
   /** Runs fn with system access, for background jobs. Needs a reason, and is audited. */
   withSystem<T>(options: { reason: string; tenantId?: string; requestId?: string }, fn: (system: SystemSession<Scope>) => Promise<T>): Promise<T>;
+  /**
+   * True when the principal's permissions allow the action on the resource. It checks policies
+   * only, without resolving the tenant, so it suits deciding which tools or buttons to show.
+   */
+  can(principal: KindePrincipal, resource: string, action: TenantAction): boolean;
+  /** The policies the guard was created with. */
+  readonly policies: Policies | undefined;
   /** Checks that the database enforces isolation. */
   verify(): Promise<VerifyResult>;
   /** Throws an UNSAFE_DATABASE TenantGuardError when verify() finds a problem. */
@@ -188,8 +197,16 @@ export function createTenantGuard<Scope>(options: TenantGuardOptions<Scope>): Te
       const error = permits(options.policies, context.principal.permissions, resource, action, false);
       if (error) refuse(error, requestId, principal, tenantId);
     };
-    const hooks: ScopeHooks = { authorize, deny: (error) => refuse(error, requestId, principal, tenantId) };
-    return options.adapter.run(context, hooks, (scope) => fn(Object.assign(Object.create(null), scope, { context, can, authorize }) as TenantSession<Scope>));
+    const deny = (error: TenantGuardError): TenantGuardError => {
+      try {
+        refuse(error, requestId, principal, tenantId);
+      } catch {
+        // refuse() records the event and throws; the caller decides where to throw.
+      }
+      return error;
+    };
+    const hooks: ScopeHooks = { authorize, deny };
+    return options.adapter.run(context, hooks, (scope) => fn(Object.assign(Object.create(null), scope, { context, can, authorize, deny }) as TenantSession<Scope>));
   }
 
   async function withSystem<T>(opts: { reason: string; tenantId?: string; requestId?: string }, fn: (system: SystemSession<Scope>) => Promise<T>): Promise<T> {
@@ -217,6 +234,8 @@ export function createTenantGuard<Scope>(options: TenantGuardOptions<Scope>): Te
   return {
     withTenant,
     withSystem,
+    policies: options.policies,
+    can: (principal, resource, action) => !!principal?.organization && permits(options.policies, principal.permissions ?? [], resource, action, false) === null,
     verify,
     async assertSafe() {
       const result = await verify();

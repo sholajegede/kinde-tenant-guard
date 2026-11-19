@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0
+
+- Add `testIsolation()` in `kinde-tenant-guard/testing`. It mints a token for two organizations with kinde-testkit, creates a record as each, and checks reads, reads by ID, updates and deletes across the boundary. It throws a `TenantIsolationError` that names each leak. Without a guard it calls your app through convex-test or HTTP.
+- Add the ESLint plugin in `kinde-tenant-guard/eslint`, with the `no-unguarded-db` rule. It flags calls on the raw database client and `ctx.db` in Convex functions outside the guard's setup.
+- Add `defineTenantTools()` in `kinde-tenant-guard/agents`. Agent tools run in their own tenant scope for the signed-in principal, check their permission first, and refuse input that names a tenant or organization.
+- Add `guard.can(principal, resource, action)`, `guard.policies`, and `tenant.deny(error)` for audited refusals of your own.
+- Add the `UNSAFE_TOOL_INPUT` error code.
+
 ## 0.3.0
 
 - Add the Convex adapter, `kinde-tenant-guard/convex`. `convexTenantGuard()` wraps `ctx.db` in queries and mutations so every read on a tenant table goes through an index that starts with the tenant field, inserts are stamped with the tenant, and writes to another tenant's documents are refused.

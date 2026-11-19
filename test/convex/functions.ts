@@ -132,3 +132,20 @@ export const nightlyCount = query({
   args: { tenantId: v.optional(v.string()) },
   handler: (ctx, { tenantId }) => tenants.withSystem(ctx, { reason: "nightly report", tenantId }, async (s) => (await s.db.query("projects").collect()).length),
 });
+
+export const isoCreate = mutation({
+  args: { slug: v.string() },
+  handler: (ctx, { slug }) =>
+    tenants.withTenant(ctx, async (t) => {
+      const id = await t.db.insert("projects", { name: "Isolation", slug });
+      return t.db.get(id);
+    }),
+});
+
+export const isoList = query({ args: {}, handler: (ctx) => tenants.withTenant(ctx, (t) => t.db.query("projects").collect()) });
+
+export const isoGet = query({ args: { id: v.string() }, handler: (ctx, { id }) => tenants.withTenant(ctx, (t) => t.db.get(id as Id)) });
+
+export const isoUpdate = mutation({ args: { id: v.string() }, handler: (ctx, { id }) => tenants.withTenant(ctx, (t) => t.db.patch(id as Id, { name: "changed" })) });
+
+export const isoRemove = mutation({ args: { id: v.string() }, handler: (ctx, { id }) => tenants.withTenant(ctx, (t) => t.db.delete(id as Id)) });

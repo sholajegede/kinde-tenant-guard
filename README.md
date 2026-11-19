@@ -17,7 +17,9 @@ Keep each Kinde organization's data separate. kinde-tenant-guard takes the activ
 - [SQLite, MySQL and databases without row-level security](#sqlite-mysql-and-databases-without-row-level-security)
 - [Check the database at startup](#check-the-database-at-startup)
 - [Audit events and errors](#audit-events-and-errors)
-- [Testing with kinde-testkit](#testing-with-kinde-testkit)
+- [Prove isolation with testIsolation()](#prove-isolation-with-testisolation)
+- [Lint for database access outside the guard](#lint-for-database-access-outside-the-guard)
+- [AI agent tools](#ai-agent-tools)
 - [API](#api)
 - [What this release covers](#what-this-release-covers)
 
@@ -458,37 +460,148 @@ Refusals are `TenantGuardError`s with a `code` and an HTTP `status`:
 | `POLICY_MISSING` | 403 | No policy covers the resource |
 | `CROSS_TENANT_WRITE` | 403 | A scoped insert or update named another tenant |
 | `UNSCOPED_TABLE` | 403 | A table that is not registered with the adapter |
+| `UNSAFE_TOOL_INPUT` | 403 | Agent tool input named a tenant or organization, or the tool does not exist |
 | `SYSTEM_REASON_REQUIRED` | 500 | `withSystem()` without a reason |
 | `UNSAFE_QUERY` | 403 | A query the adapter cannot limit, such as raw SQL without row-level security, or use of the Prisma client after its scope ended |
 | `UNSAFE_DATABASE` | 500 | `assertSafe()` found a problem |
 
-## Testing with kinde-testkit
+## Prove isolation with testIsolation()
 
-[kinde-testkit](https://www.npmjs.com/package/kinde-testkit) mints real Kinde-shaped tokens for any organization and permission set, so you can prove isolation in your own test suite. This package's tests do the same:
+`testIsolation()` checks, in your own test suite, that two Kinde organizations cannot reach each other's records. It mints a real Kinde-shaped token for each organization with [kinde-testkit](https://www.npmjs.com/package/kinde-testkit), creates a record as each one, and then tries every operation you describe across the boundary.
+
+```bash
+npm install --save-dev kinde-testkit
+```
 
 ```ts
-import { scenario, KindeTestkit } from "kinde-testkit";
-import { principalFromClaims } from "kinde-tenant-guard";
+import { testIsolation } from "kinde-tenant-guard/testing";
 
-const testkit = await KindeTestkit.create({ issuer: "https://acme.kinde.test" });
-
-async function principal(org: string, permissions: string[]) {
-  const token = await testkit.tokenFor(scenario().user({ email: `${org}@example.test` }).organization(org).permissions(permissions).authenticated());
-  return principalFromClaims(await testkit.verify(token!));
-}
-
-it("Globex cannot see Acme's invoices", async () => {
-  const rows = await tenantGuard.withTenant(await principal("org_globex", ["invoices:read"]), (t) => t.db.select().from(invoices));
-  expect(rows.every((r) => r.tenantId === "t_globex")).toBe(true);
+it("keeps Acme and Globex apart", async () => {
+  await testIsolation(tenantGuard, {
+    organizations: ["org_acme", "org_globex"],
+    resources: {
+      projects: {
+        create: async (t) => (await t.db.insert(projects).values({ name: "Isolation test" }).returning())[0],
+        list: (t) => t.db.select().from(projects),
+        get: async (t, id) => (await t.db.select().from(projects).where(eq(projects.id, id as number)))[0],
+        update: (t, row) => t.db.update(projects).set({ name: "changed" }).where(eq(projects.id, row.id)),
+        remove: (t, row) => t.db.delete(projects).where(eq(projects.id, row.id)),
+      },
+    },
+  });
 });
 ```
+
+Both organization codes must map to tenants in your test database. Each function runs inside `withTenant()` for one organization, and these are the checks:
+
+| Check | Passes when |
+| --- | --- |
+| Organization | A token with no active organization, and a request that names the other organization, are refused |
+| Create | Each organization can create its record |
+| Read | Each organization's `list()` has its own record and not the other's |
+| Get | Organization A reading B's record by ID gets nothing or is refused |
+| Update | Organization A's update of B's record leaves it unchanged |
+| Delete | Organization A's delete of B's record leaves it in place |
+
+`get`, `update` and `remove` are optional. When a check fails, `testIsolation()` throws a `TenantIsolationError` that names each leak, such as `projects read: org_acme can see org_globex's record 42`, and has the full report on `error.report`. The test users get every permission in your policies, unless you pass `permissions`.
+
+On Convex, or to test your HTTP API, leave out the guard. Each function then gets the organization, with an `identity` for `convex-test` and a signed `token` for an `Authorization` header:
+
+```ts
+await testIsolation({
+  organizations: ["org_acme", "org_globex"],
+  permissions: ["projects:read", "projects:write", "projects:delete"],
+  resources: {
+    projects: {
+      create: (org) => t.withIdentity(org.identity).mutation(api.projects.create, { name: "Isolation test" }),
+      list: (org) => t.withIdentity(org.identity).query(api.projects.list, {}),
+      remove: (org, row) => t.withIdentity(org.identity).mutation(api.projects.remove, { id: row._id }),
+    },
+  },
+});
+```
+
+## Lint for database access outside the guard
+
+The guard protects the queries that go through it. The ESLint rule `no-unguarded-db` finds the ones that do not: calls on your raw database client, and `ctx.db` in Convex functions.
+
+```js
+// eslint.config.js
+import tenantGuard from "kinde-tenant-guard/eslint";
+
+export default [
+  tenantGuard.configs.recommended,
+  // Migrations and seed scripts use the raw client on purpose.
+  { files: ["db/migrate.ts", "db/seed.ts"], rules: { "kinde-tenant-guard/no-unguarded-db": "off" } },
+];
+```
+
+```ts
+const rows = await db.select().from(invoices);
+// error: `db` is the raw database client, so this query is not limited to a tenant.
+
+export const list = query({ handler: (ctx) => ctx.db.query("projects").collect() });
+// error: `ctx.db` reaches every tenant's documents.
+```
+
+The rule allows the raw client where the guard needs it: in the arguments to `createTenantGuard()`, `convexTenantGuard()`, `drizzleAdapter()` and `prismaAdapter()`, and in a function named `resolveTenant`. By default it treats `db` and `prisma` as raw clients and `ctx` as the Convex context. Change that with options:
+
+```js
+{ rules: { "kinde-tenant-guard/no-unguarded-db": ["error", { clients: ["database"], convexContexts: ["ctx"] }] } }
+```
+
+## AI agent tools
+
+An agent that reads or changes tenant data is one prompt injection away from asking for another tenant's records. `defineTenantTools()` makes the tenant come from the signed-in user, never from the model:
+
+```ts
+import { defineTenantTools } from "kinde-tenant-guard/agents";
+
+export const projectTools = defineTenantTools(tenantGuard, {
+  listProjects: {
+    resource: "projects",
+    action: "read",
+    description: "List the organization's projects.",
+    run: (t) => t.db.select().from(projects),
+  },
+  renameProject: {
+    resource: "projects",
+    action: "update",
+    description: "Rename a project.",
+    run: (t, input: { id: number; name: string }) => t.db.update(projects).set({ name: input.name }).where(eq(projects.id, input.id)),
+  },
+});
+```
+
+For each agent run, bind the tools to the user's principal and give the model only the tools their permissions allow:
+
+```ts
+import { tool } from "ai";
+import { z } from "zod";
+
+const session = projectTools.forPrincipal(principal);
+const schemas = { listProjects: z.object({}), renameProject: z.object({ id: z.number(), name: z.string() }) };
+
+const tools = Object.fromEntries(
+  session.available.map((t) => [t.name, tool({ description: t.description, inputSchema: schemas[t.name], execute: t.execute })]),
+);
+```
+
+Every call:
+
+- Opens its own `withTenant()` scope for the user, so the database only reaches their organization.
+- Checks the tool's permission before it runs, and writes a refusal to the audit log.
+- Refuses input that contains `tenantId`, `orgCode`, `organizationId` or a similar key at any depth, with `UNSAFE_TOOL_INPUT`. Change the list with the `forbiddenInputKeys` option.
+
+`session.call(name, input)` runs a tool by name and refuses names that are not defined, for frameworks that route tool calls themselves. `tenantGuard.can(principal, resource, action)` gives the same permission answer outside a scope, for example to decide which buttons to show.
 
 ## API
 
 From `kinde-tenant-guard`:
 
-- `createTenantGuard({ adapter, resolveTenant, policies, onAudit })` returns `{ withTenant, withSystem, verify, assertSafe }`.
-- `withTenant(principal, fn, { requestId, organizationCode })` runs `fn(tenant)`. `tenant` has the adapter's scope, plus `context`, `can(resource, action)` and `authorize(resource, action)`.
+- `createTenantGuard({ adapter, resolveTenant, policies, onAudit })` returns `{ withTenant, withSystem, can, verify, assertSafe, policies }`.
+- `withTenant(principal, fn, { requestId, organizationCode })` runs `fn(tenant)`. `tenant` has the adapter's scope, plus `context`, `can(resource, action)`, `authorize(resource, action)` and `deny(error)`, which writes your own refusal to the audit log.
+- `can(principal, resource, action)` checks the policies without opening a scope.
 - `withSystem({ reason, tenantId }, fn)` runs `fn(system)` with system access.
 - `principalFromClaims(claims)` and `verifyKindeToken(token, { issuer, audience })` build a `KindePrincipal`. Machine-to-machine tokens become `{ type: "machine", subject: <client ID> }`.
 - `definePolicies(policies)`, `TenantGuardError` and `isTenantGuardError(error, code)`.
@@ -511,6 +624,18 @@ From `kinde-tenant-guard/convex`:
 - `withTenant(ctx, fn, options)` runs `fn(tenant)` with `tenant.db`, the scoped database. `withSystem(ctx, { reason, tenantId }, fn)` runs `fn(system)`.
 - `principal(ctx)` is optional. By default the principal comes from `ctx.auth.getUserIdentity()`.
 
+From `kinde-tenant-guard/testing`:
+
+- `testIsolation(guard, { organizations, resources, permissions, roles, testkit })` and `testIsolation({ organizations, resources, permissions, roles, testkit })` return the report or throw a `TenantIsolationError`.
+
+From `kinde-tenant-guard/agents`:
+
+- `defineTenantTools(guard, definitions, { forbiddenInputKeys })` returns `{ forPrincipal, definitions }`. `forPrincipal(principal)` returns `{ available, tools, call }`.
+
+From `kinde-tenant-guard/eslint`:
+
+- The default export is the ESLint plugin, with `configs.recommended` and the `no-unguarded-db` rule.
+
 ## What this release covers
 
 | Capability | Status |
@@ -525,6 +650,9 @@ From `kinde-tenant-guard/convex`:
 | Prisma with PostgreSQL row-level security | Implemented, tested against PostgreSQL 17 with Prisma 7 |
 | Prisma query extension for SQLite and MySQL | Implemented, tested with SQLite |
 | Convex adapter with scoped `ctx.db`, indexes and search indexes | Implemented, tested with `convex-test` |
+| Isolation tests with `testIsolation()` | Implemented, tested on Drizzle with PostgreSQL and on Convex |
+| ESLint rule for database access outside the guard | Implemented, tested with ESLint 10 |
+| Tenant-safe AI agent tools | Implemented, tested on Drizzle with PostgreSQL |
 
 ## License
 
