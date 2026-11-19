@@ -249,6 +249,8 @@ const projects = await tenantGuard.withTenant(principal, (tenant) =>
 
 Convex has no SQL and no row-level security, so the guard wraps `ctx.db` instead. Every read on a tenant table goes through an index whose first field is the tenant field, and the guard fills in that field. Writes are stamped with the tenant, and writes to another tenant's documents are refused.
 
+A complete app with Kinde sign-in, two organizations and per-organization roles is in [examples/convex](https://github.com/sholajegede/kinde-tenant-guard/tree/main/examples/convex).
+
 ### 1. Give each tenant table a tenant field and an index that starts with it
 
 ```ts
@@ -286,7 +288,7 @@ export const tenants = convexTenantGuard({
 
 The guard reads the schema when it is created. It throws if a tenant table is missing or has no index that starts with the tenant field.
 
-The principal comes from `ctx.auth.getUserIdentity()`. Set up Kinde as a custom JWT provider in `convex/auth.config.ts` and send Convex the Kinde access token, which carries `org_code` and `permissions`. The guard reads those claims from the identity. If your setup puts them somewhere else, pass `principal(ctx)` to `convexTenantGuard()` and build the principal yourself.
+The principal comes from `ctx.auth.getUserIdentity()`. Set up Kinde as a custom JWT provider in `convex/auth.config.ts` and send Convex the Kinde access token, which carries `org_code` and `permissions`. Kinde's Convex guide sends the ID token, which has neither claim, so set the API audience on `KindeProvider`, return `getAccessToken()` from your Convex auth hook, and switch organizations with `login({ orgCode })`. The guard reads those claims from the identity. If your setup puts them somewhere else, pass `principal(ctx)` to `convexTenantGuard()` and build the principal yourself.
 
 ### 3. Use it in a query or mutation
 

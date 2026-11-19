@@ -1,0 +1,32 @@
+{
+  "name": "kinde-tenant-guard-convex-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npm-run-all --parallel dev:backend dev:frontend",
+    "dev:backend": "convex dev",
+    "dev:frontend": "vite",
+    "build": "tsc -p . && vite build",
+    "test": "vitest run",
+    "check": "kinde-tenant-guard check"
+  },
+  "dependencies": {
+    "@kinde-oss/kinde-auth-react": "^5.13.2",
+    "convex": "^1.51.0",
+    "kinde-tenant-guard": "^0.5.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@edge-runtime/vm": "^5.0.0",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.3.0",
+    "convex-test": "^0.0.73",
+    "kinde-testkit": "^0.8.0",
+    "npm-run-all2": "^8.0.4",
+    "typescript": "5.9",
+    "vite": "^8.3.8",
+    "vitest": "^5.1.1"
+  }
+}
