@@ -2,3 +2,10 @@ node_modules
 dist
 .env.local
 .convex
+# Files `npx convex init` writes for coding agents
+AGENTS.md
+CLAUDE.md
+.agents
+.claude
+skills-lock.json
+convex/_generated/ai
