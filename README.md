@@ -1,6 +1,6 @@
 # kinde-tenant-guard
 
-Keep each Kinde organization's data separate. kinde-tenant-guard takes the active organization from a verified Kinde token and limits every database query to that organization's rows. On PostgreSQL, row-level security enforces it, so a query that forgets its filter still cannot read or change another organization's data. It works with Drizzle and Prisma.
+Keep each Kinde organization's data separate. kinde-tenant-guard takes the active organization from a verified Kinde token and limits every database query to that organization's rows. On PostgreSQL, row-level security enforces it, so a query that forgets its filter still cannot read or change another organization's data. On Convex, which has no row-level security, it wraps `ctx.db` so every read goes through an index on the tenant field. It works with Drizzle, Prisma and Convex.
 
 ![How kinde-tenant-guard works: a verified Kinde token with org_code goes to Tenant Guard, which resolves the tenant and checks permissions, sets app.tenant_id for one transaction, and PostgreSQL row-level security limits every query to that tenant's rows](https://raw.githubusercontent.com/sholajegede/kinde-tenant-guard/main/docs/how-it-works.png)
 
@@ -10,7 +10,8 @@ Keep each Kinde organization's data separate. kinde-tenant-guard takes the activ
 - [Install](#install)
 - [Quick start with Drizzle and PostgreSQL](#quick-start-with-drizzle-and-postgresql)
 - [Quick start with Prisma and PostgreSQL](#quick-start-with-prisma-and-postgresql)
-- [What is protected](#what-is-protected)
+- [Quick start with Convex](#quick-start-with-convex)
+- [What is protected on PostgreSQL](#what-is-protected-on-postgresql)
 - [Permissions](#permissions)
 - [Background jobs](#background-jobs)
 - [SQLite, MySQL and databases without row-level security](#sqlite-mysql-and-databases-without-row-level-security)
@@ -45,7 +46,7 @@ kinde-tenant-guard moves the filter out of your route code:
 npm install kinde-tenant-guard
 ```
 
-Node 20 or later. The Drizzle adapter needs `drizzle-orm` 0.36 or later, and the Prisma adapter needs Prisma 7 or later with a driver adapter, such as `@prisma/adapter-pg`.
+Node 20 or later. The Drizzle adapter needs `drizzle-orm` 0.36 or later, the Prisma adapter needs Prisma 7 or later with a driver adapter, such as `@prisma/adapter-pg`, and the Convex adapter needs `convex` 1.46 or later.
 
 ## Quick start with Drizzle and PostgreSQL
 
@@ -241,7 +242,96 @@ const projects = await tenantGuard.withTenant(principal, (tenant) =>
 
 `tenant.db` is your Prisma client inside one transaction, with the tenant set. A query extension also adds the tenant to every `where`, stamps `create`, `createMany` and `upsert`, refuses data that names another tenant, and checks your policies on every operation: `tenant.db.project.deleteMany()` needs `projects:delete`. The client refuses to run once the `withTenant()` callback has finished. Each scope is one interactive transaction, and Prisma's default timeout is 5 seconds. Pass `transactionOptions: { timeout: 15000 }` to `prismaAdapter()` for longer requests.
 
-## What is protected
+## Quick start with Convex
+
+Convex has no SQL and no row-level security, so the guard wraps `ctx.db` instead. Every read on a tenant table goes through an index whose first field is the tenant field, and the guard fills in that field. Writes are stamped with the tenant, and writes to another tenant's documents are refused.
+
+### 1. Give each tenant table a tenant field and an index that starts with it
+
+```ts
+// convex/schema.ts
+import { defineSchema, defineTable } from "convex/server";
+import { v } from "convex/values";
+
+export default defineSchema({
+  tenants: defineTable({ kindeOrgCode: v.string(), name: v.string() }).index("by_org", ["kindeOrgCode"]),
+  projects: defineTable({ tenantId: v.string(), name: v.string(), slug: v.string() })
+    .index("by_tenant", ["tenantId"])
+    .index("by_tenant_slug", ["tenantId", "slug"])
+    .searchIndex("search_name", { searchField: "name", filterFields: ["tenantId"] }),
+  plans: defineTable({ name: v.string() }),
+});
+```
+
+### 2. Create the guard
+
+```ts
+// convex/tenant.ts
+import { convexTenantGuard } from "kinde-tenant-guard/convex";
+import schema from "./schema";
+
+export const tenants = convexTenantGuard({
+  schema,
+  tables: ["projects"],
+  shared: ["plans"],
+  tenantField: "tenantId",
+  policies, // the same definePolicies() as above, keyed by table name
+  resolveTenant: async (ctx, orgCode) =>
+    (await ctx.db.query("tenants").withIndex("by_org", (q) => q.eq("kindeOrgCode", orgCode)).unique())?._id ?? null,
+});
+```
+
+The guard reads the schema when it is created. It throws if a tenant table is missing or has no index that starts with the tenant field.
+
+The principal comes from `ctx.auth.getUserIdentity()`. Set up Kinde as a custom JWT provider in `convex/auth.config.ts` and send Convex the Kinde access token, which carries `org_code` and `permissions`. The guard reads those claims from the identity. If your setup puts them somewhere else, pass `principal(ctx)` to `convexTenantGuard()` and build the principal yourself.
+
+### 3. Use it in a query or mutation
+
+```ts
+// convex/projects.ts
+import { mutation, query } from "./_generated/server";
+import { v } from "convex/values";
+import { tenants } from "./tenant";
+
+export const list = query({
+  args: {},
+  handler: (ctx) => tenants.withTenant(ctx, (t) => t.db.query("projects").collect()),
+});
+
+export const bySlug = query({
+  args: { slug: v.string() },
+  handler: (ctx, { slug }) =>
+    tenants.withTenant(ctx, (t) => t.db.query("projects").withIndex("by_tenant_slug", (q) => q.eq("slug", slug)).unique()),
+});
+
+export const create = mutation({
+  args: { name: v.string(), slug: v.string() },
+  handler: (ctx, args) => tenants.withTenant(ctx, (t) => t.db.insert("projects", args)),
+});
+```
+
+In `withIndex()`, the range starts after the tenant field, so `q.eq("slug", slug)` is the second field of `by_tenant_slug`. `t.db` is read-only in queries and a writer in mutations, with the same types as `ctx.db` except that `insert` does not need the tenant field.
+
+| Case | Result |
+| --- | --- |
+| `query()` with no index, `.order()`, `.take()` or `.fullTableScan()` | Only the tenant's documents, through the first tenant index |
+| `withIndex()` on an index that starts with the tenant field | The guard fills in the tenant |
+| `withIndex()` on any other index | Refused with `UNSAFE_QUERY` |
+| `withSearchIndex()` on a search index that lists the tenant field in `filterFields` | Filtered to the tenant |
+| `withSearchIndex()` on any other search index | Refused with `UNSAFE_QUERY` |
+| `get()` of another tenant's document | `null` |
+| `insert()` without a tenant value | Stamped with the tenant |
+| `insert()` or `patch()` that names another tenant | Refused with `CROSS_TENANT_WRITE` |
+| `patch()`, `replace()` or `delete()` of another tenant's document | Refused with `CROSS_TENANT_WRITE` |
+| A table that is not registered | Refused with `UNSCOPED_TABLE` |
+| A write to a shared table | Refused with `FORBIDDEN` |
+| `t.db` used after the `withTenant()` callback has finished | Refused with `UNSAFE_QUERY` |
+
+Every row is a test that runs the functions with `convex-test`. `get`, `patch`, `replace` and `delete` work with both the `(table, id)` and the older `(id)` forms, and `ctx.db.table(name)` is scoped the same way.
+
+For internal functions and crons, use `tenants.withSystem(ctx, { reason: "nightly report", tenantId }, (s) => ...)`. With a `tenantId`, `s.db` is scoped to that tenant. Without one, it is `ctx.db`.
+
+## What is protected on PostgreSQL
 
 Every row below is a test that runs against a real PostgreSQL server, connected as an ordinary app role.
 
@@ -260,10 +350,10 @@ Every row below is a test that runs against a real PostgreSQL server, connected 
 | Prepared statements, nested transactions and savepoints | Only the tenant's rows | Drizzle |
 | 24 concurrent requests from two organizations on a pool of 4 connections | Each sees only its own tenant | Drizzle, Prisma |
 | A pooled connection after a request | Keeps no tenant, so a query outside the guard returns no rows | Drizzle |
-| A token with no `org_code` | Refused with `NO_ORGANIZATION` | Both, in the core |
-| An organization with no tenant | Refused with `UNKNOWN_TENANT` | Both, in the core |
-| A request parameter that names another organization | Refused with `ORGANIZATION_MISMATCH` | Both, in the core |
-| A user who belongs to several organizations (`org_codes`) | Reaches only the active one, from `org_code` | Both, in the core |
+| A token with no `org_code` | Refused with `NO_ORGANIZATION` | All adapters, in the core |
+| An organization with no tenant | Refused with `UNKNOWN_TENANT` | All adapters, in the core |
+| A request parameter that names another organization | Refused with `ORGANIZATION_MISMATCH` | All adapters, in the core |
+| A user who belongs to several organizations (`org_codes`) | Reaches only the active one, from `org_code` | All adapters, in the core |
 
 The tenant is set with `set_config('app.tenant_id', ..., true)`. The `true` makes it local to the transaction, so when the transaction ends the connection goes back to the pool with no tenant.
 
@@ -415,6 +505,12 @@ From `kinde-tenant-guard/prisma`:
 - The scope has `db`, the guarded Prisma client.
 - `TENANT_DEFAULT_SQL`, the expression for `@default(dbgenerated(...))`.
 
+From `kinde-tenant-guard/convex`:
+
+- `convexTenantGuard({ schema, tables, tenantField, shared, resolveTenant, policies, onAudit, principal })` returns `{ withTenant, withSystem, verify }`.
+- `withTenant(ctx, fn, options)` runs `fn(tenant)` with `tenant.db`, the scoped database. `withSystem(ctx, { reason, tenantId }, fn)` runs `fn(system)`.
+- `principal(ctx)` is optional. By default the principal comes from `ctx.auth.getUserIdentity()`.
+
 ## What this release covers
 
 | Capability | Status |
@@ -428,7 +524,7 @@ From `kinde-tenant-guard/prisma`:
 | Startup check for roles and policies | Implemented |
 | Prisma with PostgreSQL row-level security | Implemented, tested against PostgreSQL 17 with Prisma 7 |
 | Prisma query extension for SQLite and MySQL | Implemented, tested with SQLite |
-| Convex adapter | Not yet |
+| Convex adapter with scoped `ctx.db`, indexes and search indexes | Implemented, tested with `convex-test` |
 
 ## License
 

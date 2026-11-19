@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.0
+
+- Add the Convex adapter, `kinde-tenant-guard/convex`. `convexTenantGuard()` wraps `ctx.db` in queries and mutations so every read on a tenant table goes through an index that starts with the tenant field, inserts are stamped with the tenant, and writes to another tenant's documents are refused.
+- Search indexes are scoped when they list the tenant field in `filterFields`. Other indexes and search indexes are refused.
+- Shared tables can be read from a tenant scope but not written. Unregistered tables are refused.
+- The guard reads the Convex schema at startup and throws if a tenant table has no index on the tenant field.
+- `principalFromClaims()` accepts a Convex `UserIdentity`, which names the subject and issuer `subject` and `issuer`.
+- The core no longer imports `node:crypto`, so it runs in the Convex runtime and other edge runtimes.
+
 ## 0.2.0
 
 - Add the Prisma adapter, `kinde-tenant-guard/prisma`, for Prisma 7. A query extension adds the tenant to every operation on the registered models, stamps creates and upserts, refuses data that names another tenant, and checks the policy for each operation. On PostgreSQL each scope runs in one interactive transaction with the tenant set, so row-level security also limits nested reads and raw SQL.

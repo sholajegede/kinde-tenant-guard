@@ -16,6 +16,14 @@ export interface KindePrincipal {
 }
 
 function strings(value: unknown): string[] {
+  // Some token bridges hand arrays over as JSON text, so accept that form too.
+  if (typeof value === "string" && value.startsWith("[")) {
+    try {
+      value = JSON.parse(value);
+    } catch {
+      return [];
+    }
+  }
   if (!Array.isArray(value)) return [];
   return value
     .map((item) => (typeof item === "string" ? item : item && typeof item === "object" && "key" in item ? String((item as { key: unknown }).key) : null))
@@ -31,12 +39,13 @@ export function principalFromClaims(verified: JWTPayload | object): KindePrincip
   const claims = verified as Record<string, unknown>;
   const gty = claims.gty;
   const machine = Array.isArray(gty) ? gty.includes("client_credentials") : gty === "client_credentials";
-  const subject = machine ? String(claims.azp ?? claims.client_id ?? "") : String(claims.sub ?? "");
+  // Convex hands claims over as a UserIdentity, which names sub and iss "subject" and "issuer".
+  const subject = machine ? String(claims.azp ?? claims.client_id ?? "") : String(claims.sub ?? claims.subject ?? "");
   const orgCode = typeof claims.org_code === "string" && claims.org_code ? claims.org_code : null;
   return {
     type: machine ? "machine" : "user",
     subject,
-    issuer: String(claims.iss ?? ""),
+    issuer: String(claims.iss ?? claims.issuer ?? ""),
     organization: orgCode ? { code: orgCode } : null,
     roles: strings(claims.roles),
     permissions: strings(claims.permissions),

@@ -1,7 +1,9 @@
-import { randomUUID } from "node:crypto";
 import { TenantGuardError } from "./errors.js";
 import type { Policies, TenantAction } from "./policies.js";
 import type { KindePrincipal } from "./principal.js";
+
+// The Web Crypto global works in Node 20+, edge runtimes and the Convex runtime, unlike node:crypto.
+const randomUUID = () => globalThis.crypto.randomUUID();
 
 /** The trusted tenant for one request. Frozen, so nothing can change it after it is created. */
 export interface TenantContext {

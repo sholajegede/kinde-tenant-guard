@@ -1,7 +1,7 @@
 {
   "name": "kinde-tenant-guard",
-  "version": "0.2.0",
-  "description": "Keep each Kinde organization's data separate. Scopes every database query to the signed-in user's active Kinde organization, with PostgreSQL row-level security as the boundary. Adapters for Drizzle and Prisma.",
+  "version": "0.3.0",
+  "description": "Keep each Kinde organization's data separate. Scopes every database query to the signed-in user's active Kinde organization, with PostgreSQL row-level security as the boundary where it exists. Adapters for Drizzle, Prisma and Convex.",
   "type": "module",
   "license": "MIT",
   "author": "Shola Jegede",
@@ -22,7 +22,8 @@
     "authorization",
     "saas",
     "organizations",
-    "prisma"
+    "prisma",
+    "convex"
   ],
   "engines": {
     "node": ">=20"
@@ -64,6 +65,16 @@
         "default": "./dist/prisma.cjs"
       }
     },
+    "./convex": {
+      "import": {
+        "types": "./dist/convex.d.ts",
+        "default": "./dist/convex.js"
+      },
+      "require": {
+        "types": "./dist/convex.d.cts",
+        "default": "./dist/convex.cjs"
+      }
+    },
     "./package.json": "./package.json"
   },
   "main": "./dist/index.cjs",
@@ -78,8 +89,9 @@
     "prepublishOnly": "npm run typecheck && npm test && npm run build"
   },
   "peerDependencies": {
+    "@prisma/client": ">=7",
     "drizzle-orm": ">=0.36",
-    "@prisma/client": ">=7"
+    "convex": ">=1.46"
   },
   "peerDependenciesMeta": {
     "drizzle-orm": {
@@ -87,12 +99,16 @@
     },
     "@prisma/client": {
       "optional": true
+    },
+    "convex": {
+      "optional": true
     }
   },
   "dependencies": {
     "jose": "^6.2.17"
   },
   "devDependencies": {
+    "@edge-runtime/vm": "^5.0.0",
     "@prisma/adapter-better-sqlite3": "7.10.1",
     "@prisma/adapter-pg": "7.10.1",
     "@prisma/client": "7.10.1",
@@ -100,6 +116,8 @@
     "@types/node": "^22.20.5",
     "@types/pg": "^8.23.1",
     "better-sqlite3": "^13.2.0",
+    "convex": "^1.51.0",
+    "convex-test": "^0.0.73",
     "drizzle-orm": "^0.45.4",
     "embedded-postgres": "17.11.0-beta.19",
     "kinde-testkit": "^0.8.0",

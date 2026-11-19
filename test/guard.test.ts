@@ -152,6 +152,11 @@ describe("principalFromClaims()", () => {
     const claims: KindeAccessToken = { sub: "kp_1", iss: "https://acme.kinde.com", org_code: "org_acme", org_codes: ["org_acme", "org_globex"], permissions: ["projects:read"], roles: [{ id: "r1", key: "admin", name: "Admin" }] };
     expect(principalFromClaims(claims)).toMatchObject({ type: "user", subject: "kp_1", organization: { code: "org_acme" }, roles: ["admin"], permissions: ["projects:read"] });
   });
+
+  it("accepts a Convex UserIdentity, including arrays passed as JSON text", () => {
+    const identity = { subject: "kp_1", issuer: "https://acme.kinde.com", tokenIdentifier: "https://acme.kinde.com|kp_1", org_code: "org_acme", permissions: '["projects:read"]' };
+    expect(principalFromClaims(identity)).toMatchObject({ type: "user", subject: "kp_1", issuer: "https://acme.kinde.com", organization: { code: "org_acme" }, permissions: ["projects:read"] });
+  });
 });
 
 describe("guard setup", () => {
