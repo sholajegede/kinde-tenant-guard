@@ -1,6 +1,6 @@
 {
   "name": "kinde-tenant-guard",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Keep each Kinde organization's data separate. Scopes every database query to the signed-in user's active Kinde organization, with PostgreSQL row-level security as the boundary where it exists. Adapters for Drizzle, Prisma and Convex, isolation tests built on kinde-testkit, an ESLint rule, and tenant-safe AI agent tools.",
   "type": "module",
   "license": "MIT",

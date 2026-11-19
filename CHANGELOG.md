@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.1
+
+- Documentation only. The README links a complete Convex example with Kinde sign-in, two organizations and per-organization roles, in `examples/convex`.
+- The Convex setup was tested with a real Kinde sign-in: Convex receives `org_code` and `permissions` from the Kinde access token unchanged. The README now says to send Convex the access token, not the ID token, and to switch organizations with `login({ orgCode })`.
+
 ## 0.5.0
 
 - Add the `kinde-tenant-guard check` command. It finds database access outside the guard, tenant tables and models the guard does not cover, registered tables without the tenant field, and Convex tenant tables without a tenant index. With `--database-url`, it also checks row-level security in the live database. `--json` prints the report for CI and coding agents, and it exits with 1 on an error.
